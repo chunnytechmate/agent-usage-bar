@@ -1,21 +1,27 @@
-// AgentUsageBar — a native macOS menu bar app (the "Stats" style) that shows
-// three agent-quota percentages, nothing else:
+// AgentUsageBar — a native macOS menu bar app that reproduces Stats' own
+// "Mini" widget (Kit/Widgets/Mini.swift in exelban/stats): three separate
+// menu-bar boxes, each a small left-aligned caption on top and a bigger
+// left-aligned percentage underneath —
 //
-//     C 42% · W 8% · Z 37%
+//   Claude   Weekly    ZAI
+//    42%       8%      37%
 //
-//   C  Claude 5-hour session utilization
-//   W  Claude weekly (7-day) utilization
-//   Z  Z.AI Coding Plan token quota
+//   Claude  5-hour session utilization
+//   Weekly  Claude weekly (7-day) utilization
+//   ZAI     Z.AI Coding Plan token quota
 //
 // It is the macOS menu bar version of agent-usage-widget: same endpoints, same
-// severity colors (green < 70, amber 70–89, red ≥ 90), re-built as a tiny
-// NSStatusItem app — no Electron, no dock icon, ~0% idle CPU.
+// severity colors (green < 70, amber 70–89, red ≥ 90), re-built as tiny
+// NSStatusItem widgets — no Electron, no dock icon, ~0% idle CPU.
 //
 // Auth, exactly like the widget:
-//   Claude  re-reads ~/.claude/.credentials.json on every poll (Claude Code
-//           keeps that token refreshed). Falls back to ANTHROPIC_AUTH_TOKEN +
-//           ANTHROPIC_BASE_URL for relay setups, since some expose the same
-//           /api/oauth/usage route.
+//   Claude  re-reads ~/.claude/.credentials.json on every poll, then falls
+//           back to the macOS Keychain (service "Claude Code-credentials") —
+//           current Claude Code builds store the OAuth token there instead of
+//           the file, so a Mac with no credentials.json can still be signed
+//           in. Falls back further to ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL
+//           for relay setups, since some expose the same /api/oauth/usage
+//           route.
 //   Z.AI    ZAI_API_KEY env → ~/.config/agent-usage-bar/env → the original
 //           widget's .env → ANTHROPIC_AUTH_TOKEN when the base URL is z.ai
 //           (the GLM Coding Plan key works against the quota endpoint).
@@ -46,7 +52,7 @@ enum Severity: String {
 
 struct MeterReading {
     let id: String            // "session" | "claude-weekly" | "zai"
-    let label: String         // menu-bar letter: C / W / Z
+    let label: String         // menu-bar caption: Claude / Weekly / ZAI
     let name: String          // full name for the menu rows
     var percent: Int?
     var resetsAt: Date?
@@ -69,13 +75,48 @@ func env(_ name: String) -> String? {
 
 /// ~/.claude/.credentials.json → { claudeAiOauth: { accessToken } }, re-read
 /// every poll so we always ride the token Claude Code itself keeps fresh.
-func claudeOAuthToken() -> String? {
-    guard let raw = try? String(contentsOfFile: claudeCredsPath, encoding: .utf8),
-          let data = raw.data(using: .utf8),
+func claudeFileToken() -> String? {
+    guard let raw = try? String(contentsOfFile: claudeCredsPath, encoding: .utf8) else { return nil }
+    return parseOAuthAccessToken(raw)
+}
+
+/// Newer Claude Code builds keep the OAuth token in the login Keychain
+/// (service "Claude Code-credentials") instead of the file — same JSON shape.
+/// Shelling out to /usr/bin/security reuses the exact binary a Terminal
+/// `security find-generic-password` query already has silent access to, so
+/// our own (differently-signed) binary doesn't trigger a fresh Keychain
+/// access prompt just to read it.
+func claudeKeychainToken() -> String? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+    task.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-a", NSUserName(), "-w"]
+    let outPipe = Pipe()
+    task.standardOutput = outPipe
+    task.standardError = Pipe() // silence "security: SecKeychainSearchCopyNext: ..." on a miss
+    do {
+        try task.run()
+        task.waitUntilExit()
+        guard task.terminationStatus == 0 else { return nil }
+        let raw = String(data: outPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        return parseOAuthAccessToken(raw)
+    } catch {
+        return nil
+    }
+}
+
+func parseOAuthAccessToken(_ raw: String) -> String? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard let data = trimmed.data(using: .utf8),
           let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
           let oauth = obj["claudeAiOauth"] as? [String: Any],
           let token = oauth["accessToken"] as? String else { return nil }
     return token
+}
+
+/// File first (cheap, no subprocess), then Keychain — whichever this
+/// particular Mac's Claude Code build actually uses.
+func claudeOAuthToken() -> String? {
+    claudeFileToken() ?? claudeKeychainToken()
 }
 
 func fetchJSON(_ url: URL, headers: [String: String]) async throws -> [String: Any] {
@@ -104,16 +145,23 @@ func claudeUsageHeaders(token: String) -> [String: String] {
 
 /// Claude session + weekly rows. Prefers a real Claude Code OAuth login; falls
 /// back to the ANTHROPIC_* relay environment when one is configured.
+///
+/// Always returns exactly two rows (session, weekly) — even on failure — so
+/// Claude and Weekly each keep their own menu-bar box instead of one collapsing away.
 func fetchClaude() async -> [MeterReading] {
+    var session = MeterReading(id: "session", label: "Claude", name: "Claude · 5-hour session",
+                                percent: nil, resetsAt: nil, error: nil)
+    var weekly = MeterReading(id: "claude-weekly", label: "Weekly", name: "Claude · Weekly",
+                               percent: nil, resetsAt: nil, error: nil)
     do {
         var url = officialUsageURL
         var viaRelay = false
-        var token: String
+        let token: String
         if let oauth = claudeOAuthToken() {
             token = oauth
         } else if let relayToken = env("ANTHROPIC_AUTH_TOKEN"), let base = env("ANTHROPIC_BASE_URL") {
             // Relay setup (e.g. the GLM Coding Plan endpoint): some relays proxy
-            // the same usage route; if this one doesn't, the row says so.
+            // the same usage route; if this one doesn't, the rows say so.
             token = relayToken
             viaRelay = true
             url = URL(string: base.trimmingCharacters(in: CharacterSet(charactersIn: "/")) + "/api/oauth/usage")
@@ -122,28 +170,22 @@ func fetchClaude() async -> [MeterReading] {
             throw URLError(.userAuthenticationRequired)
         }
         let data = try await fetchJSON(url, headers: claudeUsageHeaders(token: token))
-        var rows: [MeterReading] = []
         if let five = data["five_hour"] as? [String: Any],
            let util = five["utilization"] as? Double {
-            rows.append(MeterReading(id: "session", label: "C", name: "Claude · 5-hour session",
-                                     percent: Int(util.rounded()),
-                                     resetsAt: (five["resets_at"] as? String).flatMap(isoDate),
-                                     error: nil))
+            session.percent = Int(util.rounded())
+            session.resetsAt = (five["resets_at"] as? String).flatMap(isoDate)
         }
         if let seven = data["seven_day"] as? [String: Any],
            let util = seven["utilization"] as? Double {
-            rows.append(MeterReading(id: "claude-weekly", label: "W", name: "Claude · Weekly",
-                                     percent: Int(util.rounded()),
-                                     resetsAt: (seven["resets_at"] as? String).flatMap(isoDate),
-                                     error: nil))
+            weekly.percent = Int(util.rounded())
+            weekly.resetsAt = (seven["resets_at"] as? String).flatMap(isoDate)
         }
-        if rows.isEmpty {
-            return [MeterReading(id: "claude", label: "C", name: "Claude", percent: nil, resetsAt: nil,
-                                 error: viaRelay
-                                     ? "relay doesn't expose /api/oauth/usage — sign in with Claude Code for C/W"
-                                     : "usage response had no session/weekly rows")]
+        if session.percent == nil && weekly.percent == nil {
+            let msg = viaRelay
+                ? "relay doesn't expose /api/oauth/usage — sign in with Claude Code for C/W"
+                : "usage response had no session/weekly rows"
+            session.error = msg; weekly.error = msg
         }
-        return rows
     } catch {
         let reason: String
         if claudeOAuthToken() == nil && env("ANTHROPIC_AUTH_TOKEN") == nil {
@@ -153,8 +195,9 @@ func fetchClaude() async -> [MeterReading] {
         } else {
             reason = "usage endpoint unreachable (\(error.localizedDescription))"
         }
-        return [MeterReading(id: "claude", label: "C", name: "Claude", percent: nil, resetsAt: nil, error: reason)]
+        session.error = reason; weekly.error = reason
     }
+    return [session, weekly]
 }
 
 /// First non-empty ZAI_API_KEY from: env → the bar's own env file → the
@@ -187,7 +230,7 @@ func rangeOfFirstMatch(in text: String, pattern: String) -> Range<String.Index>?
 
 func fetchZai() async -> MeterReading {
     guard let key = zaiKey() else {
-        return MeterReading(id: "zai", label: "Z", name: "Z.AI", percent: nil, resetsAt: nil,
+        return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
                             error: "no key — set ZAI_API_KEY in ~/.config/agent-usage-bar/env")
     }
     do {
@@ -197,22 +240,22 @@ func fetchZai() async -> MeterReading {
         ])
         // { code: 200, data: { level, limits: [ { type: "TOKENS_LIMIT", percentage, nextResetTime } ] } }
         if let code = body["code"] as? Int, code != 200 {
-            return MeterReading(id: "zai", label: "Z", name: "Z.AI", percent: nil, resetsAt: nil,
+            return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
                                 error: body["msg"] as? String ?? "Z.AI error \(code)")
         }
         let data = body["data"] as? [String: Any] ?? [:]
         let limits = data["limits"] as? [[String: Any]] ?? []
         guard let tokens = limits.first(where: { ($0["type"] as? String) == "TOKENS_LIMIT" }) else {
-            return MeterReading(id: "zai", label: "Z", name: "Z.AI", percent: nil, resetsAt: nil,
+            return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
                                 error: "no TOKENS_LIMIT in response")
         }
         let pct = (tokens["percentage"] as? Double) ?? 0
         let resetMs = tokens["nextResetTime"] as? Double
-        return MeterReading(id: "zai", label: "Z", name: "Z.AI", percent: Int(pct.rounded()),
+        return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: Int(pct.rounded()),
                             resetsAt: resetMs.flatMap { Date(timeIntervalSince1970: $0 / 1000) },
                             error: nil)
     } catch {
-        return MeterReading(id: "zai", label: "Z", name: "Z.AI", percent: nil, resetsAt: nil,
+        return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
                             error: "quota endpoint unreachable (\(error.localizedDescription))")
     }
 }
@@ -242,11 +285,71 @@ func resetsLine(_ date: Date?) -> String {
     return "resets \(fmt.string(from: date)) (\(countdown(to: date)))"
 }
 
+// MARK: - Meter widget
+//
+// A direct port of Stats' own "Mini" widget (Kit/Widgets/Mini.swift in
+// exelban/stats) rather than an approximation: same two font sizes (7pt
+// label, 12pt value), same left alignment for both lines — Stats does not
+// center them, so the shorter line sits flush against the longer line's left
+// edge instead of centered under it — and the same non-flipped, bottom-
+// anchored rects, just scaled to this bar's own measured content width
+// instead of Stats' fixed 31pt (our captions are full words, not letters).
+
+final class MeterColumnView: NSView {
+    var reading = MeterReading(id: "", label: "", name: "", percent: nil, resetsAt: nil, error: nil) {
+        didSet { needsDisplay = true }
+    }
+
+    static let labelFont = NSFont.systemFont(ofSize: 7, weight: .light)
+    static let valueFont = NSFont.systemFont(ofSize: 12, weight: .regular)
+    static let leftStyle: NSParagraphStyle = {
+        let style = NSMutableParagraphStyle()
+        style.alignment = .left
+        return style
+    }()
+
+    private func labelString() -> NSAttributedString {
+        NSAttributedString(string: reading.label.isEmpty ? " " : reading.label, attributes: [
+            .font: Self.labelFont,
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: Self.leftStyle,
+        ])
+    }
+
+    private func valueString() -> NSAttributedString {
+        let text = reading.percent.map { "\($0)%" } ?? "–"
+        let color = reading.percent != nil ? reading.severity.color : NSColor.labelColor
+        return NSAttributedString(string: text, attributes: [
+            .font: Self.valueFont, .foregroundColor: color, .paragraphStyle: Self.leftStyle,
+        ])
+    }
+
+    /// Width that fits the wider of the two lines, left edge shared, plus a hair of padding.
+    var fittingWidth: CGFloat {
+        max(labelString().size().width, valueString().size().width).rounded(.up) + 4
+    }
+
+    // Not flipped (AppKit default, same as Stats' Mini widget): y=0 is the
+    // bottom. Label sits 10pt down from the top of the bar, value sits 1pt
+    // up from the bottom — Stats' own numbers on a 22pt-tall bar, generalized
+    // proportionally so a taller (notched-Mac) menu bar still packs the same.
+    override func draw(_ dirtyRect: NSRect) {
+        let label = labelString(), value = valueString()
+        let labelRect = NSRect(x: 0, y: bounds.height - 10, width: bounds.width, height: 7)
+        let valueRect = NSRect(x: 0, y: 1, width: bounds.width, height: 13)
+        label.draw(with: labelRect)
+        value.draw(with: valueRect)
+    }
+}
+
 // MARK: - Controller
 
 @MainActor
 final class BarController: NSObject {
-    let statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    // One NSStatusItem per meter (Claude, Weekly, ZAI) — separate stacked
+    // boxes, the way Stats itself shows one small widget per sensor.
+    var items: [NSStatusItem] = []
+    var meterViews: [MeterColumnView] = []
     var timer: Timer?
     var readings: [MeterReading] = []
     var updatedAt = Date()
@@ -263,8 +366,23 @@ final class BarController: NSObject {
         }
     }
 
+    // Display order: Claude (5-hour session), Weekly, ZAI — matches fetchClaude()'s
+    // [session, weekly] + fetchZai()'s [zai] concatenation in poll().
+    static let placeholders: [(label: String, name: String)] = [
+        ("Claude", "Claude · 5-hour session"), ("Weekly", "Claude · Weekly"), ("ZAI", "Z.AI"),
+    ]
+
     func start() {
-        statusItem.button?.toolTip = "Agent Usage Bar"
+        for (label, name) in Self.placeholders {
+            let item = NSStatusBar.system.statusItem(withLength: 30)
+            let view = MeterColumnView(frame: NSRect(x: 0, y: 0, width: 30, height: NSStatusBar.system.thickness))
+            view.reading = MeterReading(id: "", label: label, name: name, percent: nil, resetsAt: nil, error: nil)
+            item.button?.addSubview(view)
+            item.button?.toolTip = "Agent Usage Bar"
+            items.append(item)
+            meterViews.append(view)
+        }
+        render() // show the placeholders immediately, before the first poll lands
         rebuildMenu()
         poll()
         scheduleTimer()
@@ -305,36 +423,20 @@ final class BarController: NSObject {
         }
     }
 
-    // MARK: menu bar title
+    // MARK: menu bar boxes
 
     func render() {
-        guard let button = statusItem.button else { return }
-        let title = NSMutableAttributedString()
-        let labelFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        let valueFont = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-        let dim = NSColor.labelColor.withAlphaComponent(0.55)
-
-        for (i, r) in readings.enumerated() {
-            if i > 0 { title.append(str("  ·  ", font: labelFont, color: dim)) }
-            title.append(str(" \(r.label) ", font: labelFont, color: dim))
-            if let pct = r.percent {
-                title.append(str("\(pct)%", font: valueFont, color: r.severity.color))
-            } else {
-                title.append(str("–", font: valueFont, color: dim))
-            }
-        }
-        if readings.isEmpty {
-            title.append(str("…", font: valueFont, color: dim))
-        }
-        button.attributedTitle = title
-        button.toolTip = readings.map { r -> String in
+        let thickness = NSStatusBar.system.thickness
+        for (i, item) in items.enumerated() {
+            let view = meterViews[i]
+            if i < readings.count { view.reading = readings[i] }
+            let width = max(22, view.fittingWidth)
+            item.length = width
+            view.frame = NSRect(x: 0, y: 0, width: width, height: thickness)
+            let r = view.reading
             let value = r.percent.map { "\($0)%" } ?? (r.error ?? "–")
-            return "\(r.name): \(value)"
-        }.joined(separator: "\n")
-    }
-
-    func str(_ text: String, font: NSFont, color: NSColor) -> NSAttributedString {
-        NSAttributedString(string: text, attributes: [.font: font, .foregroundColor: color])
+            item.button?.toolTip = "\(r.name): \(value)"
+        }
     }
 
     // MARK: menu
@@ -415,7 +517,9 @@ final class BarController: NSObject {
         quit.target = self
         menu.addItem(quit)
 
-        statusItem.menu = menu
+        // Same combined menu (all three meters + settings) on every box, so
+        // clicking C, W, or Z all opens the full picture.
+        for item in items { item.menu = menu }
     }
 
     var isBundledApp: Bool {

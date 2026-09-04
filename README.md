@@ -1,25 +1,31 @@
 # Agent Usage Bar
 
-Three agent-quota percentages, always in your macOS menu bar — nothing else:
+Three agent-quota percentages, always in your macOS menu bar — nothing else.
+The widget is a direct port of Stats' own "Mini" widget: a small caption on
+top, the percent underneath, both left-aligned (not centered) — the shorter
+line sits flush against the longer line's left edge, exactly like Stats.
 
-![C 78% · W 12% · Z 46% in the macOS menu bar, severity-colored](docs/preview.png)
+![Claude 78%, Weekly 12%, ZAI 46% as three stacked menu-bar boxes, severity-colored](docs/preview.png)
 
-```
-C  78%  ·  W  12%  ·  Z  46%
-```
-
-| Letter | Meter | Source |
+| Box | Meter | Source |
 | :--- | :--- | :--- |
-| **C** | Claude 5-hour session utilization | Claude Code OAuth usage endpoint |
-| **W** | Claude weekly (7-day) utilization | Claude Code OAuth usage endpoint |
-| **Z** | Z.AI Coding Plan token quota | Z.AI quota endpoint |
+| **Claude** | 5-hour session utilization | Claude Code OAuth usage endpoint |
+| **Weekly** | Claude weekly (7-day) utilization | Claude Code OAuth usage endpoint |
+| **ZAI** | Z.AI Coding Plan token quota | Z.AI quota endpoint |
 
 This is the **macOS menu bar version** of
 [agent-usage-widget](https://github.com/chunnytechmate/agent-usage-widget) —
-re-built as a native Swift `NSStatusItem` app in the spirit of
-[Stats](https://github.com/exelban/stats): no Electron, no dock icon, no window,
-~0% idle CPU. If you only ever wanted the percents, this replaces both the
-widget strip and your general-purpose stats app.
+re-built as three native Swift `NSStatusItem` widgets, reproducing
+[Stats](https://github.com/exelban/stats)' own widget rendering
+(`Kit/Widgets/Mini.swift`) instead of just taking inspiration from it: no
+Electron, no dock icon, no window, ~0% idle CPU. If you only ever wanted the
+percents, this replaces both the widget strip and your general-purpose stats
+app.
+
+Claude, Weekly, and ZAI are separate menu-bar boxes in that order (like
+Stats' own sensors), each with its own tight two-line label-over-value
+layout — clicking any one of them opens the same dropdown with all three
+meters and settings.
 
 Each percentage is severity-colored (green < 70, amber 70–89, red ≥ 90), with
 monospaced digits so the bar never jitters as numbers change.
@@ -60,12 +66,15 @@ enable **Launch at Login** from its menu.
 
 Exactly the credentials agent-usage-widget uses — nothing new is stored:
 
-- **Claude (C, W)** — works automatically wherever Claude Code is signed in:
-  the bar re-reads `~/.claude/.credentials.json` on every poll and rides the
-  token Claude Code keeps refreshed. Relay setups (`ANTHROPIC_BASE_URL` +
-  `ANTHROPIC_AUTH_TOKEN`) are attempted too, but most relays don't expose the
-  usage endpoint — on those machines C/W show *not signed in*.
-- **Z.AI (Z)** — the key is resolved in this order:
+- **Claude (Claude, Weekly)** — works automatically wherever Claude Code is
+  signed in. The bar re-reads `~/.claude/.credentials.json` on every poll; if
+  that file doesn't exist (current Claude Code builds keep the OAuth token in
+  the login Keychain instead, under service `Claude Code-credentials`), it
+  falls back to reading that via `security find-generic-password`. Relay
+  setups (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) are attempted last,
+  but most relays don't expose the usage endpoint — on those machines both
+  boxes show *not signed in*.
+- **ZAI** — the key is resolved in this order:
   1. `ZAI_API_KEY` environment variable
   2. `~/.config/agent-usage-bar/env` containing `ZAI_API_KEY=sk-...`
      (use this when launching from Finder/Login Items, which see no shell env)
