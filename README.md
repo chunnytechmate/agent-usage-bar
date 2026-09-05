@@ -5,13 +5,13 @@ The widget is a direct port of Stats' own "Mini" widget: a small caption on
 top, the percent underneath, both left-aligned (not centered) — the shorter
 line sits flush against the longer line's left edge, exactly like Stats.
 
-![Claude 78%, Weekly 12%, ZAI 46% as three stacked menu-bar boxes, severity-colored](docs/preview.png)
+![ZAI 46%, Weekly 12%, Claude 78% as three stacked menu-bar boxes, severity-colored](docs/preview.png)
 
 | Box | Meter | Source |
 | :--- | :--- | :--- |
-| **Claude** | 5-hour session utilization | Claude Code OAuth usage endpoint |
-| **Weekly** | Claude weekly (7-day) utilization | Claude Code OAuth usage endpoint |
 | **ZAI** | Z.AI Coding Plan token quota | Z.AI quota endpoint |
+| **Weekly** | Claude weekly (7-day) utilization | Claude Code OAuth usage endpoint |
+| **Claude** | 5-hour session utilization | Claude Code OAuth usage endpoint |
 
 This is the **macOS menu bar version** of
 [agent-usage-widget](https://github.com/chunnytechmate/agent-usage-widget) —
@@ -22,7 +22,7 @@ Electron, no dock icon, no window, ~0% idle CPU. If you only ever wanted the
 percents, this replaces both the widget strip and your general-purpose stats
 app.
 
-Claude, Weekly, and ZAI are separate menu-bar boxes in that order (like
+ZAI, Weekly, and Claude are separate menu-bar boxes in that order (like
 Stats' own sensors), each with its own tight two-line label-over-value
 layout — clicking any one of them opens the same dropdown with all three
 meters and settings.
@@ -66,14 +66,6 @@ enable **Launch at Login** from its menu.
 
 Exactly the credentials agent-usage-widget uses — nothing new is stored:
 
-- **Claude (Claude, Weekly)** — works automatically wherever Claude Code is
-  signed in. The bar re-reads `~/.claude/.credentials.json` on every poll; if
-  that file doesn't exist (current Claude Code builds keep the OAuth token in
-  the login Keychain instead, under service `Claude Code-credentials`), it
-  falls back to reading that via `security find-generic-password`. Relay
-  setups (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) are attempted last,
-  but most relays don't expose the usage endpoint — on those machines both
-  boxes show *not signed in*.
 - **ZAI** — the key is resolved in this order:
   1. `ZAI_API_KEY` environment variable
   2. `~/.config/agent-usage-bar/env` containing `ZAI_API_KEY=sk-...`
@@ -82,6 +74,14 @@ Exactly the credentials agent-usage-widget uses — nothing new is stored:
   4. `ANTHROPIC_AUTH_TOKEN` when `ANTHROPIC_BASE_URL` points at `z.ai` —
      the GLM Coding Plan key is the same key the quota endpoint wants, so a
      relay-configured Mac works with zero extra setup
+- **Claude (Weekly, Claude)** — works automatically wherever Claude Code is
+  signed in. The bar re-reads `~/.claude/.credentials.json` on every poll; if
+  that file doesn't exist (current Claude Code builds keep the OAuth token in
+  the login Keychain instead, under service `Claude Code-credentials`), it
+  falls back to reading that via `security find-generic-password`. Relay
+  setups (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) are attempted last,
+  but most relays don't expose the usage endpoint — on those machines both
+  boxes show *not signed in*.
 
 Keys are only ever used for these two GET requests from your own machine.
 

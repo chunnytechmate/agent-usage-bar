@@ -13,10 +13,11 @@ let severityColor: (Double) -> NSColor = { pct in
 }
 
 // Demo readings: one of each severity so the preview shows the palette.
+// Display order: ZAI, Weekly, Claude.
 let readings: [(label: String, pct: Int)] = [
-    ("Claude", 78),
-    ("Weekly", 12),
     ("ZAI", 46),
+    ("Weekly", 12),
+    ("Claude", 78),
 ]
 
 let labelFont = NSFont.systemFont(ofSize: 7, weight: .light)

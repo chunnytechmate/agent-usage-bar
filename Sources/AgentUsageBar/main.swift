@@ -3,12 +3,12 @@
 // menu-bar boxes, each a small left-aligned caption on top and a bigger
 // left-aligned percentage underneath —
 //
-//   Claude   Weekly    ZAI
-//    42%       8%      37%
+//    ZAI    Weekly   Claude
+//    37%      8%      42%
 //
-//   Claude  5-hour session utilization
-//   Weekly  Claude weekly (7-day) utilization
 //   ZAI     Z.AI Coding Plan token quota
+//   Weekly  Claude weekly (7-day) utilization
+//   Claude  5-hour session utilization
 //
 // It is the macOS menu bar version of agent-usage-widget: same endpoints, same
 // severity colors (green < 70, amber 70–89, red ≥ 90), re-built as tiny
@@ -366,10 +366,10 @@ final class BarController: NSObject {
         }
     }
 
-    // Display order: Claude (5-hour session), Weekly, ZAI — matches fetchClaude()'s
-    // [session, weekly] + fetchZai()'s [zai] concatenation in poll().
+    // Display order: ZAI, Weekly, Claude (5-hour session) — matches the
+    // [zai, weekly, session] order poll() assembles into `readings`.
     static let placeholders: [(label: String, name: String)] = [
-        ("Claude", "Claude · 5-hour session"), ("Weekly", "Claude · Weekly"), ("ZAI", "Z.AI"),
+        ("ZAI", "Z.AI"), ("Weekly", "Claude · Weekly"), ("Claude", "Claude · 5-hour session"),
     ]
 
     func start() {
@@ -407,9 +407,10 @@ final class BarController: NSObject {
 
     func poll() {
         Task { @MainActor in
-            let claude = await fetchClaude()
+            let claude = await fetchClaude() // [session, weekly]
             let zai = await fetchZai()
-            self.readings = claude + [zai]
+            // Display order per request: ZAI, Weekly, Claude (5-hour session).
+            self.readings = [zai, claude[1], claude[0]]
             self.updatedAt = Date()
             self.render()
             self.rebuildMenu()
