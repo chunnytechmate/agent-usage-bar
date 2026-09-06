@@ -119,13 +119,25 @@ func claudeOAuthToken() -> String? {
     claudeFileToken() ?? claudeKeychainToken()
 }
 
+/// A non-2xx HTTP response, carrying the actual status code and a short
+/// snippet of the body — previously fetchJSON collapsed every one of these
+/// into `URLError(.badServerResponse)`, so all a user ever saw was the
+/// meaningless "-1011" (that error's raw code) instead of e.g. "401" or
+/// "429".
+struct HTTPStatusError: Error {
+    let statusCode: Int
+    let bodySnippet: String
+}
+
 func fetchJSON(_ url: URL, headers: [String: String]) async throws -> [String: Any] {
     var request = URLRequest(url: url, timeoutInterval: 15)
     request.httpMethod = "GET"
     for (k, v) in headers { request.setValue(v, forHTTPHeaderField: k) }
     let (data, response) = try await URLSession.shared.data(for: request)
     if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
-        throw URLError(.badServerResponse)
+        let snippet = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines).prefix(200) ?? ""
+        throw HTTPStatusError(statusCode: http.statusCode, bodySnippet: String(snippet))
     }
     guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
         throw URLError(.cannotParseResponse)
@@ -192,6 +204,16 @@ func fetchClaude() async -> [MeterReading] {
             reason = "not signed in — log in with Claude Code on this Mac"
         } else if let urlErr = error as? URLError, urlErr.code == .userAuthenticationRequired {
             reason = "not signed in — log in with Claude Code on this Mac"
+        } else if let httpErr = error as? HTTPStatusError {
+            switch httpErr.statusCode {
+            case 401, 403:
+                reason = "not signed in — log in with Claude Code on this Mac"
+            case 429:
+                reason = "rate limited by usage endpoint (429) — try again shortly"
+            default:
+                reason = "usage endpoint returned \(httpErr.statusCode)"
+                    + (httpErr.bodySnippet.isEmpty ? "" : ": \(httpErr.bodySnippet)")
+            }
         } else {
             reason = "usage endpoint unreachable (\(error.localizedDescription))"
         }
@@ -255,8 +277,15 @@ func fetchZai() async -> MeterReading {
                             resetsAt: resetMs.flatMap { Date(timeIntervalSince1970: $0 / 1000) },
                             error: nil)
     } catch {
+        let reason: String
+        if let httpErr = error as? HTTPStatusError {
+            reason = "quota endpoint returned \(httpErr.statusCode)"
+                + (httpErr.bodySnippet.isEmpty ? "" : ": \(httpErr.bodySnippet)")
+        } else {
+            reason = "quota endpoint unreachable (\(error.localizedDescription))"
+        }
         return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
-                            error: "quota endpoint unreachable (\(error.localizedDescription))")
+                            error: reason)
     }
 }
 
