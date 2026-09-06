@@ -285,12 +285,20 @@ func countdown(to target: Date) -> String {
 
 /// "resets 22:10 (50min)" today, "resets Thu 08:59 (4d 19h)" another day.
 func resetsLine(_ date: Date?) -> String {
-    guard let date else { return "" }
+    guard let parts = resetsLineParts(date) else { return "" }
+    return parts.prefix + parts.countdown
+}
+
+/// Same text as `resetsLine`, split into the "resets 22:10 " prefix and the
+/// "(50min)" countdown so the menu can highlight the countdown separately —
+/// at 13pt secondaryLabelColor it used to read as barely-there.
+func resetsLineParts(_ date: Date?) -> (prefix: String, countdown: String)? {
+    guard let date else { return nil }
     let cal = Calendar.current
     let sameDay = cal.isDate(date, inSameDayAs: Date())
     let fmt = DateFormatter()
     fmt.dateFormat = sameDay ? "HH:mm" : "EEE HH:mm"
-    return "resets \(fmt.string(from: date)) (\(countdown(to: date)))"
+    return ("resets \(fmt.string(from: date)) ", "(\(countdown(to: date)))")
 }
 
 // MARK: - Meter widget
@@ -468,10 +476,13 @@ final class BarController: NSObject {
                     .foregroundColor: r.severity.color,
                 ])
                 name.append(sev)
-                let reset = resetsLine(r.resetsAt)
-                if !reset.isEmpty {
-                    name.append(NSAttributedString(string: "   \(reset)", attributes: [
+                if let (prefix, countdown) = resetsLineParts(r.resetsAt) {
+                    name.append(NSAttributedString(string: "   \(prefix)", attributes: [
                         .font: base, .foregroundColor: NSColor.secondaryLabelColor,
+                    ]))
+                    name.append(NSAttributedString(string: countdown, attributes: [
+                        .font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold),
+                        .foregroundColor: NSColor.labelColor,
                     ]))
                 }
                 line.append(name)
