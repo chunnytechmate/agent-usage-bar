@@ -262,8 +262,16 @@ func fetchZai() async -> MeterReading {
 
 // MARK: - Formatting
 
+/// Parses both "...371462+00:00" (fractional seconds, what /api/oauth/usage
+/// actually returns) and the plain "...+00:00" form — the default
+/// ISO8601DateFormatter only handles the latter and silently returns nil on
+/// the former, which was making resetsAt (and the reset-time display) always
+/// nil for Claude.
 func isoDate(_ s: String) -> Date? {
-    ISO8601DateFormatter().date(from: s)
+    let withFractional = ISO8601DateFormatter()
+    withFractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    if let date = withFractional.date(from: s) { return date }
+    return ISO8601DateFormatter().date(from: s)
 }
 
 /// "50min" / "2h 05m" / "4d 19h" — the widget's countdown style.
@@ -436,7 +444,8 @@ final class BarController: NSObject {
             view.frame = NSRect(x: 0, y: 0, width: width, height: thickness)
             let r = view.reading
             let value = r.percent.map { "\($0)%" } ?? (r.error ?? "–")
-            item.button?.toolTip = "\(r.name): \(value)"
+            let reset = resetsLine(r.resetsAt)
+            item.button?.toolTip = reset.isEmpty ? "\(r.name): \(value)" : "\(r.name): \(value)  \(reset)"
         }
     }
 
