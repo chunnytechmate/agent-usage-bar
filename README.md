@@ -36,8 +36,10 @@ Click the bar for details and controls:
 
 - Each meter's full row — `Claude · 5-hour session  78%   resets 04:52 (3h 07m)`
 - **Refresh Now** (⌘R)
-- **Poll Interval** — 1 / 5 / 15 / 30 minutes (default 5; also re-polls a few
-  seconds after the Mac wakes from sleep)
+- **Poll Interval** — 1 / 5 / 15 / 30 minutes (default 15 — Anthropic's usage
+  endpoint isn't built for dashboard-grade polling and starts 429'ing well
+  before a 5 min interval catches up; also re-polls a few seconds after the
+  Mac wakes from sleep)
 - **Launch at Login** (when running from the built `.app`)
 - **Quit** (⌘Q)
 

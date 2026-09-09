@@ -457,7 +457,7 @@ final class BarController: NSObject {
     ]
 
     var intervalSeconds: Int {
-        get { UserDefaults.standard.object(forKey: "pollIntervalSeconds") as? Int ?? 300 }
+        get { UserDefaults.standard.object(forKey: "pollIntervalSeconds") as? Int ?? 900 }
         set {
             UserDefaults.standard.set(newValue, forKey: "pollIntervalSeconds")
             scheduleTimer()
