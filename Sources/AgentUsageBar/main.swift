@@ -127,6 +127,20 @@ func claudeOAuthToken() -> String? {
 struct HTTPStatusError: Error {
     let statusCode: Int
     let bodySnippet: String
+    let retryAfterSeconds: Double?
+}
+
+/// "Retry-After" is either a delay in seconds ("120") or an HTTP-date
+/// ("Wed, 09 Sep 2026 21:13:47 GMT") — RFC 9110 §10.2.3 allows both.
+func parseRetryAfter(_ raw: String?) -> Double? {
+    guard let raw = raw?.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+    if let seconds = Double(raw) { return seconds }
+    let fmt = DateFormatter()
+    fmt.locale = Locale(identifier: "en_US_POSIX")
+    fmt.timeZone = TimeZone(identifier: "GMT")
+    fmt.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
+    guard let date = fmt.date(from: raw) else { return nil }
+    return date.timeIntervalSinceNow
 }
 
 func fetchJSON(_ url: URL, headers: [String: String]) async throws -> [String: Any] {
@@ -137,7 +151,8 @@ func fetchJSON(_ url: URL, headers: [String: String]) async throws -> [String: A
     if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) {
         let snippet = String(data: data, encoding: .utf8)?
             .trimmingCharacters(in: .whitespacesAndNewlines).prefix(200) ?? ""
-        throw HTTPStatusError(statusCode: http.statusCode, bodySnippet: String(snippet))
+        let retryAfter = parseRetryAfter(http.value(forHTTPHeaderField: "Retry-After"))
+        throw HTTPStatusError(statusCode: http.statusCode, bodySnippet: String(snippet), retryAfterSeconds: retryAfter)
     }
     guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
         throw URLError(.cannotParseResponse)
@@ -160,11 +175,26 @@ func claudeUsageHeaders(token: String) -> [String: String] {
 ///
 /// Always returns exactly two rows (session, weekly) — even on failure — so
 /// Claude and Weekly each keep their own menu-bar box instead of one collapsing away.
-func fetchClaude() async -> [MeterReading] {
-    var session = MeterReading(id: "session", label: "Claude", name: "Claude · 5-hour session",
-                                percent: nil, resetsAt: nil, error: nil)
-    var weekly = MeterReading(id: "claude-weekly", label: "Weekly", name: "Claude · Weekly",
-                               percent: nil, resetsAt: nil, error: nil)
+///
+/// `previous` seeds the result so a failed poll keeps showing the last
+/// successfully-fetched percent/resetsAt instead of blanking the box to "–"
+/// — a poll that fails (e.g. a transient 429) used to wipe out a perfectly
+/// good number that was on screen a second ago. `cooldownUntil` is an active
+/// 429 backoff from an earlier poll; while it's in the future we skip the
+/// network call entirely rather than re-hammering an endpoint that just told
+/// us to wait, which only prolongs the block.
+func fetchClaude(previous: (session: MeterReading, weekly: MeterReading), cooldownUntil: Date?)
+    async -> (readings: [MeterReading], cooldownUntil: Date?)
+{
+    var session = previous.session
+    var weekly = previous.weekly
+    session.error = nil
+    weekly.error = nil
+    if let cooldownUntil, cooldownUntil > Date() {
+        let msg = "rate limited by usage endpoint — retrying in \(countdown(to: cooldownUntil))"
+        session.error = msg; weekly.error = msg
+        return ([session, weekly], cooldownUntil)
+    }
     do {
         var url = officialUsageURL
         var viaRelay = false
@@ -198,8 +228,10 @@ func fetchClaude() async -> [MeterReading] {
                 : "usage response had no session/weekly rows"
             session.error = msg; weekly.error = msg
         }
+        return ([session, weekly], nil) // success (or a parsed-but-empty response) clears any prior cooldown
     } catch {
         let reason: String
+        var newCooldownUntil: Date?
         if claudeOAuthToken() == nil && env("ANTHROPIC_AUTH_TOKEN") == nil {
             reason = "not signed in — log in with Claude Code on this Mac"
         } else if let urlErr = error as? URLError, urlErr.code == .userAuthenticationRequired {
@@ -209,7 +241,9 @@ func fetchClaude() async -> [MeterReading] {
             case 401, 403:
                 reason = "not signed in — log in with Claude Code on this Mac"
             case 429:
-                reason = "rate limited by usage endpoint (429) — try again shortly"
+                let wait = httpErr.retryAfterSeconds ?? 60
+                newCooldownUntil = Date().addingTimeInterval(wait)
+                reason = "rate limited by usage endpoint — retrying in \(countdown(to: newCooldownUntil!))"
             default:
                 reason = "usage endpoint returned \(httpErr.statusCode)"
                     + (httpErr.bodySnippet.isEmpty ? "" : ": \(httpErr.bodySnippet)")
@@ -218,8 +252,8 @@ func fetchClaude() async -> [MeterReading] {
             reason = "usage endpoint unreachable (\(error.localizedDescription))"
         }
         session.error = reason; weekly.error = reason
+        return ([session, weekly], newCooldownUntil)
     }
-    return [session, weekly]
 }
 
 /// First non-empty ZAI_API_KEY from: env → the bar's own env file → the
@@ -250,10 +284,19 @@ func rangeOfFirstMatch(in text: String, pattern: String) -> Range<String.Index>?
     return r
 }
 
-func fetchZai() async -> MeterReading {
+/// Same last-known-good preservation and 429 backoff as `fetchClaude` — see
+/// its doc comment.
+func fetchZai(previous: MeterReading, cooldownUntil: Date?) async -> (reading: MeterReading, cooldownUntil: Date?) {
+    var reading = previous
+    reading.error = nil
     guard let key = zaiKey() else {
-        return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
-                            error: "no key — set ZAI_API_KEY in ~/.config/agent-usage-bar/env")
+        reading.percent = nil; reading.resetsAt = nil // no key configured at all, not a transient failure
+        reading.error = "no key — set ZAI_API_KEY in ~/.config/agent-usage-bar/env"
+        return (reading, nil)
+    }
+    if let cooldownUntil, cooldownUntil > Date() {
+        reading.error = "rate limited by quota endpoint — retrying in \(countdown(to: cooldownUntil))"
+        return (reading, cooldownUntil)
     }
     do {
         let body = try await fetchJSON(zaiQuotaURL, headers: [
@@ -262,30 +305,37 @@ func fetchZai() async -> MeterReading {
         ])
         // { code: 200, data: { level, limits: [ { type: "TOKENS_LIMIT", percentage, nextResetTime } ] } }
         if let code = body["code"] as? Int, code != 200 {
-            return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
-                                error: body["msg"] as? String ?? "Z.AI error \(code)")
+            reading.error = body["msg"] as? String ?? "Z.AI error \(code)"
+            return (reading, nil)
         }
         let data = body["data"] as? [String: Any] ?? [:]
         let limits = data["limits"] as? [[String: Any]] ?? []
         guard let tokens = limits.first(where: { ($0["type"] as? String) == "TOKENS_LIMIT" }) else {
-            return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
-                                error: "no TOKENS_LIMIT in response")
+            reading.error = "no TOKENS_LIMIT in response"
+            return (reading, nil)
         }
         let pct = (tokens["percentage"] as? Double) ?? 0
         let resetMs = tokens["nextResetTime"] as? Double
-        return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: Int(pct.rounded()),
-                            resetsAt: resetMs.flatMap { Date(timeIntervalSince1970: $0 / 1000) },
-                            error: nil)
+        reading.percent = Int(pct.rounded())
+        reading.resetsAt = resetMs.flatMap { Date(timeIntervalSince1970: $0 / 1000) }
+        return (reading, nil)
     } catch {
         let reason: String
+        var newCooldownUntil: Date?
         if let httpErr = error as? HTTPStatusError {
-            reason = "quota endpoint returned \(httpErr.statusCode)"
-                + (httpErr.bodySnippet.isEmpty ? "" : ": \(httpErr.bodySnippet)")
+            if httpErr.statusCode == 429 {
+                let wait = httpErr.retryAfterSeconds ?? 60
+                newCooldownUntil = Date().addingTimeInterval(wait)
+                reason = "rate limited by quota endpoint — retrying in \(countdown(to: newCooldownUntil!))"
+            } else {
+                reason = "quota endpoint returned \(httpErr.statusCode)"
+                    + (httpErr.bodySnippet.isEmpty ? "" : ": \(httpErr.bodySnippet)")
+            }
         } else {
             reason = "quota endpoint unreachable (\(error.localizedDescription))"
         }
-        return MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil,
-                            error: reason)
+        reading.error = reason
+        return (reading, newCooldownUntil)
     }
 }
 
@@ -398,6 +448,9 @@ final class BarController: NSObject {
     var timer: Timer?
     var readings: [MeterReading] = []
     var updatedAt = Date()
+    // Active 429 backoffs from an earlier poll — see fetchClaude/fetchZai.
+    var claudeCooldownUntil: Date?
+    var zaiCooldownUntil: Date?
 
     static let intervals: [(label: String, seconds: Int)] = [
         ("1 min", 60), ("5 min", 300), ("15 min", 900), ("30 min", 1800),
@@ -452,8 +505,22 @@ final class BarController: NSObject {
 
     func poll() {
         Task { @MainActor in
-            let claude = await fetchClaude() // [session, weekly]
-            let zai = await fetchZai()
+            let prevSession = readings.first(where: { $0.id == "session" })
+                ?? MeterReading(id: "session", label: "Claude", name: "Claude · 5-hour session",
+                                 percent: nil, resetsAt: nil, error: nil)
+            let prevWeekly = readings.first(where: { $0.id == "claude-weekly" })
+                ?? MeterReading(id: "claude-weekly", label: "Weekly", name: "Claude · Weekly",
+                                 percent: nil, resetsAt: nil, error: nil)
+            let prevZai = readings.first(where: { $0.id == "zai" })
+                ?? MeterReading(id: "zai", label: "ZAI", name: "Z.AI", percent: nil, resetsAt: nil, error: nil)
+
+            let claudeResult = await fetchClaude(previous: (prevSession, prevWeekly), cooldownUntil: claudeCooldownUntil)
+            claudeCooldownUntil = claudeResult.cooldownUntil
+            let zaiResult = await fetchZai(previous: prevZai, cooldownUntil: zaiCooldownUntil)
+            zaiCooldownUntil = zaiResult.cooldownUntil
+
+            let claude = claudeResult.readings // [session, weekly]
+            let zai = zaiResult.reading
             // Display order per request: ZAI, Weekly, Claude (5-hour session).
             self.readings = [zai, claude[1], claude[0]]
             self.updatedAt = Date()
