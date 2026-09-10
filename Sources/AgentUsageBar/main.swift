@@ -452,12 +452,20 @@ final class BarController: NSObject {
     var claudeCooldownUntil: Date?
     var zaiCooldownUntil: Date?
 
+    // No 1-min option: the usage endpoints' rolling rate limits (the 429s that
+    // motivated the backoff) trip well below once-a-minute polling.
     static let intervals: [(label: String, seconds: Int)] = [
-        ("1 min", 60), ("5 min", 300), ("15 min", 900), ("30 min", 1800),
+        ("5 min", 300), ("15 min", 900), ("30 min", 1800),
     ]
+    static let minIntervalSeconds = intervals.map(\.seconds).min() ?? 300
 
     var intervalSeconds: Int {
-        get { UserDefaults.standard.object(forKey: "pollIntervalSeconds") as? Int ?? 900 }
+        get {
+            let stored = UserDefaults.standard.object(forKey: "pollIntervalSeconds") as? Int ?? 900
+            // Clamp up so a pre-5-min-minimum setting (e.g. a persisted 60)
+            // can't keep polling faster than the shortest offered interval.
+            return max(Self.minIntervalSeconds, stored)
+        }
         set {
             UserDefaults.standard.set(newValue, forKey: "pollIntervalSeconds")
             scheduleTimer()
